@@ -248,6 +248,22 @@ def parse_args() -> argparse.Namespace:
             "If omitted, the script auto-discovers a final best checkpoint under output-dir."
         ),
     )
+    parser.add_argument(
+        "--save-retrieval-traces",
+        action="store_true",
+        help=(
+            "Save per-query retrieved chunk traces to retrieval_traces.csv under each run directory."
+        ),
+    )
+    parser.add_argument(
+        "--retrieval-trace-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Top chunks to save per query when --save-retrieval-traces is enabled. "
+            "Use 0 to auto-resolve to max(k-values)."
+        ),
+    )
 
     parser.add_argument(
         "--baseline-backbone",
@@ -885,6 +901,15 @@ def ranked_doc_ids_for_query(
     return [agg_doc_ids[i] for i in order]
 
 
+def ranked_doc_ids_from_scores(scores: np.ndarray, corpus_doc_ids: list[str]) -> list[str]:
+    if len(corpus_doc_ids) == 0:
+        return []
+
+    agg_scores, agg_doc_ids = aggregate_by_doc_max(scores, corpus_doc_ids)
+    order = np.argsort(-agg_scores)
+    return [agg_doc_ids[i] for i in order]
+
+
 def hit_at_k(ranked: list[str], target: str, k: int) -> float:
     return 1.0 if target in ranked[:k] else 0.0
 
@@ -912,11 +937,17 @@ def evaluate_retrieval(
     tokenizer: AutoTokenizer,
     chunk_corpus_df: pd.DataFrame,
     fold_id: int,
+    window: int,
+    backbone: str,
+    loss_name: str,
     train_fold_ids: list[int],
     test_json: Path,
     k_values: list[int],
     device: str,
     batch_size: int,
+    save_retrieval_traces: bool,
+    retrieval_trace_top_k: int,
+    retrieval_trace_output_path: Optional[Path],
 ) -> dict[str, float]:
     if chunk_corpus_df.empty:
         raise RuntimeError(f"Fold {fold_id}: empty retrieval chunk corpus")
@@ -930,6 +961,7 @@ def evaluate_retrieval(
         device=device,
         batch_size=batch_size,
     )
+    corpus_chunk_texts = chunk_corpus_df["chunk_text"].astype(str).tolist()
 
     with test_json.open("r", encoding="utf-8") as handle:
         test_rows = json.load(handle)
@@ -941,9 +973,12 @@ def evaluate_retrieval(
     records.update({f"precision@{k}": [] for k in k_values})
     records.update({f"ndcg@{k}": [] for k in k_values})
     records.update({f"mrr@{k}": [] for k in k_values})
+    retrieval_trace_rows: list[dict] = []
+
+    trace_top_k = retrieval_trace_top_k if retrieval_trace_top_k > 0 else max(k_values)
 
     skipped = 0
-    for row in test_rows:
+    for query_index, row in enumerate(test_rows):
         target = str(row.get("doc_id", ""))
         if not target:
             skipped += 1
@@ -955,16 +990,52 @@ def evaluate_retrieval(
             sector=row["positive_sector"],
             device=device,
         )
-        ranked = ranked_doc_ids_for_query(query_vec, corpus_matrix, corpus_doc_ids)
+        sims = cosine_similarity(query_vec, corpus_matrix)[0]
+        ranked = ranked_doc_ids_from_scores(sims, corpus_doc_ids)
         if not ranked:
             skipped += 1
             continue
+
+        if save_retrieval_traces and retrieval_trace_output_path is not None:
+            chunk_rank_order = np.argsort(-sims)
+            max_rows = min(trace_top_k, len(chunk_rank_order))
+            query_id = str(row.get("query_id", ""))
+            for rank in range(max_rows):
+                chunk_idx = int(chunk_rank_order[rank])
+                retrieved_doc_id = str(corpus_doc_ids[chunk_idx])
+                retrieval_trace_rows.append(
+                    {
+                        "fold": fold_id,
+                        "window": window,
+                        "backbone": backbone,
+                        "loss": loss_name,
+                        "query_index": query_index,
+                        "query_id": query_id,
+                        "target_doc_id": target,
+                        "retrieved_rank": rank + 1,
+                        "retrieved_doc_id": retrieved_doc_id,
+                        "retrieved_score": float(sims[chunk_idx]),
+                        "is_relevant_doc": float(retrieved_doc_id == target),
+                        "retrieved_chunk_text": corpus_chunk_texts[chunk_idx],
+                    }
+                )
 
         for k in k_values:
             records[f"hit@{k}"].append(hit_at_k(ranked, target, k))
             records[f"precision@{k}"].append(precision_at_k(ranked, target, k))
             records[f"ndcg@{k}"].append(ndcg_at_k(ranked, target, k))
             records[f"mrr@{k}"].append(mrr_at_k(ranked, target, k))
+
+    if (
+        save_retrieval_traces
+        and retrieval_trace_output_path is not None
+        and retrieval_trace_rows
+    ):
+        retrieval_trace_output_path.parent.mkdir(parents=True, exist_ok=True)
+        pd.DataFrame(retrieval_trace_rows).to_csv(
+            retrieval_trace_output_path,
+            index=False,
+        )
 
     metrics: dict[str, float] = {}
     for name, values in records.items():
@@ -1533,11 +1604,17 @@ def train_and_eval_one(
         tokenizer=tokenizer,
         chunk_corpus_df=chunk_corpus_df,
         fold_id=fold_id,
+        window=window,
+        backbone=backbone,
+        loss_name=loss_name,
         train_fold_ids=train_fold_ids,
         test_json=test_json,
         k_values=k_values,
         device=device,
         batch_size=args.batch_size,
+        save_retrieval_traces=args.save_retrieval_traces,
+        retrieval_trace_top_k=args.retrieval_trace_top_k,
+        retrieval_trace_output_path=(run_dir / "retrieval_traces.csv"),
     )
 
     result = {
@@ -1709,6 +1786,8 @@ def main() -> None:
 
     if args.num_workers < 0:
         raise ValueError("--num-workers must be >= 0")
+    if args.retrieval_trace_top_k < 0:
+        raise ValueError("--retrieval-trace-top-k must be >= 0")
 
     os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
     print(
@@ -1815,6 +1894,8 @@ def main() -> None:
             "vectordb_collection": args.chunk_vectordb_collection,
             "chunk_fold_filter": "current_fold_only",
             "doc_score_aggregation": "max score across chunks per document",
+            "save_retrieval_traces": bool(args.save_retrieval_traces),
+            "retrieval_trace_top_k": int(args.retrieval_trace_top_k),
         },
         "hyperparameter_tuning": {
             "enabled": bool(args.tune_hyperparams),

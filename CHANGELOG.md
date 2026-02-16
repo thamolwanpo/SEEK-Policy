@@ -7,6 +7,11 @@ This file tracks notable changes across files in this repository.
 ### File: scripts/4_train_siamese.py
 
 - Updated retrieval corpus fold filtering to use the current fold only (`train_fold_ids = [fold_id]`) so each fold/window run stays within the same prepared fold directory context.
+- Added per-query chunk retrieval trace export:
+	- new `--save-retrieval-traces` flag to write ranked retrieved chunks per query
+	- new `--retrieval-trace-top-k` flag to control how many top chunks are saved per query (`0` resolves to `max(k-values)`)
+	- per-run trace output at `results/retrieval_experiments/fold_<i>/window_<w>/<backbone>/<loss>/retrieval_traces.csv`
+	- trace rows include fold/window/config, query index/id, target doc id, retrieved rank/doc id/score, relevance flag, and retrieved chunk text.
 - Added robust chunk vector DB compatibility for newer/older metadata conventions:
 	- collection resolution from `manifest.json` (`--chunk-vectordb-collection auto|manifest`)
 	- metadata key fallback support for fold/document identifiers.

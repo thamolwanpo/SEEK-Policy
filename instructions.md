@@ -255,6 +255,8 @@ Each fold/window run consumes `train.jsonl` and `test.json` from the same fold d
 ### Outputs
 - Per-run logs and checkpoints:
   - `results/retrieval_experiments/fold_<i>/window_<w>/<backbone>/<loss>/`
+  - optional per-query retrieval traces:
+    - `results/retrieval_experiments/fold_<i>/window_<w>/<backbone>/<loss>/retrieval_traces.csv`
 - Aggregated reports:
   - `results/retrieval_experiments/all_fold_results.csv`
   - `results/retrieval_experiments/summary_mean_metrics.csv`
@@ -362,6 +364,17 @@ python scripts/4_train_siamese.py \
   --eval-checkpoint results/retrieval_experiments/fold_0/window_1/climatebert_distilroberta-base-climate-f/triplet/checkpoints/final/trial_001/best.ckpt
 ```
 
+Example (save per-query retrieved chunk traces):
+```bash
+python scripts/4_train_siamese.py \
+  --fold 0 \
+  --windows 1 \
+  --backbones climatebert/distilroberta-base-climate-f \
+  --losses triplet \
+  --save-retrieval-traces \
+  --retrieval-trace-top-k 10
+```
+
 ### Important options
 - `--windows <csv>`: default `1,2,5,10`
 - `--backbones <csv>`: default
@@ -373,6 +386,8 @@ python scripts/4_train_siamese.py \
 - `--chunk-vectordb-collection <str>`: collection name; supports `auto`/`manifest` resolution from chunk DB manifest
 - `--eval-only`: skip training and evaluate using an existing checkpoint
 - `--eval-checkpoint <path>`: explicit checkpoint for eval-only mode
+- `--save-retrieval-traces`: save ranked retrieved chunks per query to per-run `retrieval_traces.csv`
+- `--retrieval-trace-top-k <int>`: number of chunk rows saved per query (`0` = use `max(--k-values)`)
 - `--baseline-backbone`, `--baseline-loss`, `--baseline-window`: baseline for paired tests
 
 Tuning options:
@@ -404,12 +419,16 @@ Runtime/reproducibility options:
 - `--tune-hyperparams --shared-tuned-hparams` requires one source fold (`--fold`) and one source window.
 
 ### Metrics and evaluation
-- Reports `Hit@k`, `Precision@k`, and `NDCG@k` for each fold and experiment.
+- Reports `Hit@k`, `Precision@k`, `NDCG@k`, and `MRR@k` for each fold and experiment.
 - Logs `train_loss` and `val_loss` by epoch via Lightning CSV logs for convergence tracking.
 - Runs paired comparisons across fold scores (candidate vs baseline):
   - Paired t-test
   - Wilcoxon signed-rank test
   - Outputs p-values in `paired_significance_tests.csv`.
+
+### Retrieval trace schema (when enabled)
+- One row per query per retrieved chunk rank.
+- Core columns: `fold`, `window`, `backbone`, `loss`, `query_index`, `query_id`, `target_doc_id`, `retrieved_rank`, `retrieved_doc_id`, `retrieved_score`, `is_relevant_doc`, `retrieved_chunk_text`.
 
 ### Why add NDCG/Precision for policy retrieval
 - `Hit@k` alone can still rank useful policy clauses low in the top-k list.
