@@ -1,0 +1,13 @@
+data/*/
+figures/
+tests/__pycache__/
+.DS_Store
+*/.DS_Store
+*/__pycache__/
+*/*/__pycache__/
+*/*/*/__pycache__/
+*.ipynb_checkpoints
+*.log
+results/
+
+.env

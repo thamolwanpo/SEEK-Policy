@@ -1,0 +1,22 @@
+numpy
+pandas
+python-dotenv
+scipy
+scikit-learn
+tqdm
+pyarrow
+
+# Deep learning / retrieval
+torch
+pytorch-lightning
+transformers
+sentence-transformers
+rank-bm25
+
+# LLM + RAG
+openai
+langchain-openai
+langchain-community
+langchain-chroma
+langchain-text-splitters
+chromadb
