@@ -50,8 +50,102 @@ def load_policy_df(path: Path) -> pd.DataFrame:
     out["Document ID"] = out["Document ID"].astype(str)
     out["text_file_path"] = out["text_file_path"].astype(str)
     out["Family Summary"] = out["Family Summary"].apply(clean_text)
+    if "Geography" not in out.columns:
+        out["Geography"] = ""
+    if "Sector" not in out.columns:
+        out["Sector"] = ""
+    out["Geography"] = out["Geography"].apply(clean_text)
+    out["Sector"] = out["Sector"].apply(clean_text)
     out = out[out["Document ID"] != ""]
     return out.reset_index(drop=True)
+
+
+def build_doc_metadata_lookup(policy_df: pd.DataFrame) -> dict[str, dict[str, str]]:
+    lookup: dict[str, dict[str, str]] = {}
+    for _, row in policy_df.iterrows():
+        doc_id = clean_text(row.get("Document ID", ""))
+        if not doc_id:
+            continue
+        if doc_id not in lookup:
+            lookup[doc_id] = {
+                "geography": clean_text(row.get("Geography", "")),
+                "sector": clean_text(row.get("Sector", "")),
+            }
+    return lookup
+
+
+def update_existing_chroma_metadata(
+    vectordb_dir: Path,
+    collection: str,
+    doc_lookup: dict[str, dict[str, str]],
+    batch_size: int,
+) -> tuple[int, int]:
+    try:
+        from langchain_chroma import Chroma
+    except Exception:
+        from langchain_community.vectorstores import Chroma
+
+    if not vectordb_dir.exists():
+        raise FileNotFoundError(f"Vector DB directory not found: {vectordb_dir}")
+
+    store = Chroma(
+        collection_name=collection,
+        embedding_function=None,
+        persist_directory=str(vectordb_dir),
+    )
+
+    offset = 0
+    scanned = 0
+    updated = 0
+
+    while True:
+        payload = store.get(include=["metadatas"], limit=batch_size, offset=offset)
+        ids = payload.get("ids", []) or []
+        metadatas = payload.get("metadatas", []) or []
+        if not ids:
+            break
+
+        ids_to_update: list[str] = []
+        metadatas_to_update: list[dict] = []
+        for row_id, metadata in zip(ids, metadatas):
+            metadata = metadata or {}
+            doc_id = clean_text(metadata.get("document_id", ""))
+            if not doc_id:
+                continue
+
+            enrichment = doc_lookup.get(doc_id, {})
+            if not enrichment:
+                continue
+
+            new_metadata = dict(metadata)
+            changed = False
+            for key in ["geography", "sector"]:
+                desired = clean_text(enrichment.get(key, ""))
+                current = clean_text(new_metadata.get(key, ""))
+                if desired and current != desired:
+                    new_metadata[key] = desired
+                    changed = True
+
+            if changed:
+                ids_to_update.append(row_id)
+                metadatas_to_update.append(new_metadata)
+
+        if ids_to_update:
+            store._collection.update(ids=ids_to_update, metadatas=metadatas_to_update)
+            updated += len(ids_to_update)
+
+        scanned += len(ids)
+        if len(ids) < batch_size:
+            break
+        offset += batch_size
+
+    if hasattr(store, "persist"):
+        try:
+            store.persist()
+        except Exception:
+            pass
+
+    return scanned, updated
 
 
 def parse_args() -> argparse.Namespace:
@@ -106,12 +200,26 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Optional cap for number of unique policy documents to ingest (0 = all).",
     )
+    parser.add_argument(
+        "--update-metadata-only",
+        action="store_true",
+        help="Update only metadata (geography/sector) in existing Chroma collection without re-embedding.",
+    )
+    parser.add_argument(
+        "--metadata-update-batch-size",
+        type=int,
+        default=1000,
+        help="Batch size for --update-metadata-only mode.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     print("[INFO] Starting chunk vector DB build")
+
+    if args.metadata_update_batch_size <= 0:
+        raise ValueError("--metadata-update-batch-size must be > 0")
 
     if args.chunk_size <= 0:
         raise ValueError("--chunk-size must be > 0")
@@ -125,15 +233,6 @@ def main() -> None:
 
     load_dotenv()
     print("[INFO] Environment variables loaded")
-    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not openai_key:
-        raise ValueError("OPENAI_API_KEY is not set. Add it to .env before building vector DB.")
-    print("[INFO] OPENAI_API_KEY detected")
-
-    try:
-        from langchain_chroma import Chroma
-    except Exception:
-        from langchain_community.vectorstores import Chroma
 
     try:
         from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -141,6 +240,7 @@ def main() -> None:
         from langchain.text_splitter import RecursiveCharacterTextSplitter
     from langchain_core.documents import Document
     from langchain_openai import OpenAIEmbeddings
+
     print("[INFO] LangChain dependencies imported")
 
     embedding_progress_state = {
@@ -150,20 +250,32 @@ def main() -> None:
 
     class ProgressOpenAIEmbeddings(OpenAIEmbeddings):
 
-        def embed_documents(self, texts: list[str], chunk_size: Optional[int] = None) -> list[list[float]]:
+        def embed_documents(
+            self, texts: list[str], chunk_size: Optional[int] = None
+        ) -> list[list[float]]:
             total = len(texts)
             if total == 0:
                 return []
 
-            configured_batch_size = int(chunk_size or getattr(self, "chunk_size", 0) or args.embedding_batch_size)
-            batch_size = configured_batch_size if configured_batch_size > 0 else args.embedding_batch_size
+            configured_batch_size = int(
+                chunk_size
+                or getattr(self, "chunk_size", 0)
+                or args.embedding_batch_size
+            )
+            batch_size = (
+                configured_batch_size
+                if configured_batch_size > 0
+                else args.embedding_batch_size
+            )
 
             vectors: list[list[float]] = []
             if (
                 embedding_progress_state["embedded_chunks_done"] == 0
                 and embedding_progress_state["expected_total_chunks"] > 0
             ):
-                print(f"[INFO] Chunks left: {embedding_progress_state['expected_total_chunks']}")
+                print(
+                    f"[INFO] Chunks left: {embedding_progress_state['expected_total_chunks']}"
+                )
 
             for start in range(0, total, batch_size):
                 batch = texts[start : start + batch_size]
@@ -182,13 +294,52 @@ def main() -> None:
     policy_df = load_policy_df(args.policy_input)
     print(f"[INFO] Loaded {len(policy_df)} rows from policy input")
 
-    source_df = policy_df[["fold", "Document ID", "text_file_path", "Family Summary"]]
+    doc_lookup = build_doc_metadata_lookup(policy_df)
+    print(f"[INFO] Built metadata lookup for {len(doc_lookup)} documents")
+
+    if args.update_metadata_only:
+        print("[INFO] Running metadata-only update mode (no re-embedding)")
+        scanned, updated = update_existing_chroma_metadata(
+            vectordb_dir=args.vectordb_dir,
+            collection=args.collection,
+            doc_lookup=doc_lookup,
+            batch_size=args.metadata_update_batch_size,
+        )
+        print(
+            f"[INFO] Metadata-only update complete: scanned={scanned}, updated={updated}"
+        )
+        return
+
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not openai_key:
+        raise ValueError(
+            "OPENAI_API_KEY is not set. Add it to .env before building vector DB."
+        )
+    print("[INFO] OPENAI_API_KEY detected")
+
+    try:
+        from langchain_chroma import Chroma
+    except Exception:
+        from langchain_community.vectorstores import Chroma
+
+    source_df = policy_df[
+        [
+            "fold",
+            "Document ID",
+            "text_file_path",
+            "Family Summary",
+            "Geography",
+            "Sector",
+        ]
+    ]
     source_df = source_df.drop_duplicates(subset=["Document ID"]).reset_index(drop=True)
     print(f"[INFO] Unique documents to process: {len(source_df)}")
 
     if args.max_docs > 0:
         source_df = source_df.head(args.max_docs).reset_index(drop=True)
-        print(f"[INFO] Applied --max-docs={args.max_docs}; processing {len(source_df)} documents")
+        print(
+            f"[INFO] Applied --max-docs={args.max_docs}; processing {len(source_df)} documents"
+        )
 
     documents: list[Document] = []
     skipped_files = 0
@@ -211,7 +362,9 @@ def main() -> None:
 
         fold = int(row["fold"])
         doc_id = str(row["Document ID"])
-        text_path = resolve_text_path(str(row.get("text_file_path", "")), args.text_path_base_dir)
+        text_path = resolve_text_path(
+            str(row.get("text_file_path", "")), args.text_path_base_dir
+        )
         raw_text = ""
         source_value = ""
 
@@ -233,6 +386,8 @@ def main() -> None:
                 "fold": fold,
                 "document_id": doc_id,
                 "source": source_value,
+                "geography": clean_text(row.get("Geography", "")),
+                "sector": clean_text(row.get("Sector", "")),
             },
         )
 
@@ -243,15 +398,23 @@ def main() -> None:
             chunk_doc.metadata["fold"] = fold
             chunk_doc.metadata["document_id"] = doc_id
             chunk_doc.metadata["source"] = source_value
+            chunk_doc.metadata["geography"] = clean_text(row.get("Geography", ""))
+            chunk_doc.metadata["sector"] = clean_text(row.get("Sector", ""))
             documents.append(chunk_doc)
 
     if not documents:
-        raise RuntimeError("No chunk documents were built. Check input file paths and content.")
+        raise RuntimeError(
+            "No chunk documents were built. Check input file paths and content."
+        )
     embedding_progress_state["expected_total_chunks"] = len(documents)
-    print(f"[INFO] Chunking complete: built {len(documents)} chunks, skipped {skipped_files} documents")
+    print(
+        f"[INFO] Chunking complete: built {len(documents)} chunks, skipped {skipped_files} documents"
+    )
 
     if args.vectordb_dir.exists() and args.rebuild:
-        print(f"[INFO] --rebuild enabled; removing existing vector DB at {args.vectordb_dir}")
+        print(
+            f"[INFO] --rebuild enabled; removing existing vector DB at {args.vectordb_dir}"
+        )
         shutil.rmtree(args.vectordb_dir)
     args.vectordb_dir.mkdir(parents=True, exist_ok=True)
     print(f"[INFO] Vector DB directory ready: {args.vectordb_dir}")

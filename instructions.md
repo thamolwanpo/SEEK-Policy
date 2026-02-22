@@ -3,6 +3,32 @@
 This document tracks usage instructions and operational notes for each script/file.
 Use one section per file so this can scale as more files are added.
 
+## Project quick run (from scratch)
+
+Run from repository root:
+
+```bash
+pip install -r requirements.txt
+```
+
+Create `.env` when running OpenAI-backed scripts:
+
+```dotenv
+OPENAI_API_KEY=
+```
+
+Suggested execution order:
+
+```bash
+python scripts/0_split_test_set.py
+python scripts/0_visualize_data_distribution.py
+python scripts/1_time_series_data_preprocessing.py
+python scripts/2_data_preparation_and_time_series_scaling.py
+python scripts/3_build_chunk_vectordb.py --rebuild
+python scripts/4_train_siamese.py --max-epochs 10
+python scripts/4_summary_only_baselines.py --chunk-vectordb-collection auto
+```
+
 ## File: scripts/0_split_test_set.py
 
 ### Purpose
@@ -439,12 +465,13 @@ Runtime/reproducibility options:
 ## File: scripts/4_summary_only_baselines.py
 
 ### Purpose
-Runs two retrieval baselines that use only policy text summaries (no time-series features):
-- Semantic retrieval with SentenceTransformer (`HumanSummaryBaseline`)
-- Keyword retrieval with BM25 (`ClimatePolicyRadarBaseline`)
+Runs summary-query retrieval baselines without time-series features:
+- Semantic retrieval over chunk corpus with OpenAI embeddings (`human_summary_chunk_semantic`)
+- Keyword retrieval over chunk corpus with BM25 (`chunk_bm25`)
 
 ### Inputs
 - `data/csv/group_kfold_assignments.csv` (must include `fold`, `Family Summary`, `Document ID`)
+- `data/vectorstore/policy_chunks_chroma/` (persisted chunk DB from `scripts/3_build_chunk_vectordb.py`)
 
 ### Outputs
 - `results/summary_only_baselines/all_fold_results.csv`
@@ -454,99 +481,126 @@ Runs two retrieval baselines that use only policy text summaries (no time-series
 
 ### How to run
 ```bash
-python scripts/4_summary_only_baselines.py
+python scripts/4_summary_only_baselines.py --chunk-vectordb-collection auto
 ```
 
 Example (single fold):
 ```bash
-python scripts/4_summary_only_baselines.py --fold 0
+python scripts/4_summary_only_baselines.py --fold 0 --chunk-vectordb-collection auto
+```
+
+Example (save retrieval traces):
+```bash
+python scripts/4_summary_only_baselines.py \
+  --save-retrieval-traces \
+  --retrieval-trace-top-k 10 \
+  --chunk-vectordb-collection auto
 ```
 
 ### Important options
 - `--policy-input <path>`: grouped fold assignment CSV (default: `data/csv/group_kfold_assignments.csv`)
 - `--output-dir <path>`: output folder (default: `results/summary_only_baselines`)
 - `--k-values <csv>`: ranking cutoffs (default: `1,5,10`)
-- `--encoder <model_name>`: SentenceTransformer model id (default: `sentence-transformers/all-distilroberta-v1`)
+- `--openai-embedding-model <model_name>`: OpenAI embedding model (default: `text-embedding-3-small`)
+- `--chunk-vectordb-dir <path>`: persisted chunk DB directory (default: `data/vectorstore/policy_chunks_chroma`)
+- `--chunk-vectordb-collection <str>`: collection name; supports `auto`/`manifest` resolution from DB manifest
+- `--save-retrieval-traces`: save per-query retrieved chunk rows per fold/method
+- `--retrieval-trace-top-k <int>`: top chunks to save per query (`0` resolves to max `k`)
 - `--fold <int>`: evaluate one fold only; if omitted all folds are evaluated
-- `--significance-baseline <str>`: baseline name used as reference in paired tests (default: `human_summary_semantic`)
+- `--significance-baseline <str>`: baseline name used as reference in paired tests (default: `human_summary_chunk_semantic`)
 
 ### Metrics and evaluation
 - Uses the same metrics as `scripts/4_train_siamese.py`:
   - `Hit@k`
   - `Precision@k`
   - `NDCG@k`
+  - `MRR@k`
 - Also computes fold-level paired significance tests across baselines:
   - paired t-test p-value
   - Wilcoxon signed-rank p-value
 - For each fold:
-  - Retrieval corpus = all rows where `fold != current_fold`
-  - Queries/targets = rows where `fold == current_fold`
+  - Retrieval corpus = chunk rows where chunk `fold == current_fold`
+  - Queries/targets = policy rows where `fold == current_fold`
   - Query text is `Family Summary`
   - Target identifier is `Document ID`
 
 ### Dependencies
 ```bash
-pip install sentence-transformers rank-bm25
+pip install langchain-openai langchain-chroma rank-bm25
 ```
+
+### Notes
+- Requires `OPENAI_API_KEY` for semantic retrieval.
 
 ## File: scripts/4_generate_role_agents_summary.py
 
 ### Purpose
-Runs role-agent summary retrieval experiments with fold-aware evaluation and statistical testing.
-It reuses the same evaluation concepts as `scripts/4_summary_only_baselines.py` and `scripts/4_train_siamese.py`.
+Runs role-agent summary retrieval experiments with fold/window-aware chunk retrieval.
+Optionally generates role-agent summaries from test-window time-series using a multi-agent OpenAI chain.
 
 ### Inputs
 - `data/csv/group_kfold_assignments.csv` (or another CSV with equivalent columns)
+- `data/model_input/kfold/fold_<i>/window_<w>/test.json`
+- `data/model_input/kfold/fold_<i>/scaled_test_time_series.csv`
+- `data/owid/**/.meta.json` (used to infer climate/socio/other table domains)
 - Required columns (defaults):
   - fold: `fold`
   - document id: `Document ID`
   - human summary: `Family Summary`
-  - role-agent query summary: `summarizer_v1` (can be generated by this script)
+  - role-agent query summary: `role_agent_summary` (can be generated by this script)
 
 ### Outputs
 - `results/role_agent_summary_experiments/all_fold_results.csv`
 - `results/role_agent_summary_experiments/summary_mean_metrics.csv`
-- `results/role_agent_summary_experiments/paired_significance_tests.csv`
 - `results/role_agent_summary_experiments/run_metadata.json`
-- optional generated summary CSV when `--generate-role-summary` is used
+- optional generated summary CSV when `--save-generated-role-summaries` is used:
+  - `results/role_agent_summary_experiments/fold_<i>/window_<w>/generated_role_agent_summaries.csv`
 
 ### How to run
 ```bash
-python scripts/4_generate_role_agents_summary.py --query-column summarizer_v1
+python scripts/4_generate_role_agents_summary.py --query-column role_agent_summary
 ```
 
 Example (single fold):
 ```bash
-python scripts/4_generate_role_agents_summary.py --fold 0 --query-column summarizer_v1
+python scripts/4_generate_role_agents_summary.py --fold 0 --window 1 --query-column role_agent_summary
 ```
 
 Example (generate summaries + evaluate):
 ```bash
 python scripts/4_generate_role_agents_summary.py \
-  --generate-role-summary \
-  --source-column "Family Summary" \
-  --query-column summarizer_v1
+  --generate-role-summary-from-time-series \
+  --save-generated-role-summaries \
+  --query-column role_agent_summary
 ```
 
 ### Important options
 - `--policy-input <path>`: input CSV (default: `data/csv/group_kfold_assignments.csv`)
+- `--model-input-dir <path>`: fold/window model-input root (default: `data/model_input/kfold`)
 - `--output-dir <path>`: output folder (default: `results/role_agent_summary_experiments`)
-- `--encoder <model_name>`: SentenceTransformer model (default: `sentence-transformers/all-distilroberta-v1`)
-- `--k-values <csv>`: ranking cutoffs (default: `1,5,10`)
-- `--query-column <str>`: role-agent summary column to use as query text (default: `summarizer_v1`)
-- `--generate-role-summary`: generate missing query summaries via OpenAI
-- `--source-column <str>`: source text column for generation (default: `Family Summary`)
+- `--metric-top-k-values/--k-values <csv>`: ranking cutoffs (default: `1,5,10`)
+- `--windows <csv>`: evaluation windows (default: `1,2,5,10`)
+- `--window <int>` / `--fold <int>`: run a single window/fold
+- `--query-column <str>`: role-agent summary column to use as query text (default: `role_agent_summary`)
+- `--owid-dir <path>`: OWID root for domain inference (default: `data/owid`)
+- `--openai-embedding-model <str>`: embedding model (default: `text-embedding-3-small`)
+- `--openai-embedding-batch-size <int>`: embedding batch size (default: `128`)
+- `--chunk-vectordb-dir <path>` / `--chunk-vectordb-collection <str>`: chunk corpus source
+- `--generate-role-summary-from-time-series`: generate missing query summaries via OpenAI chain
 - `--openai-model <str>`: OpenAI model used for generation (default: `gpt-4o-mini`)
-- `--significance-baseline <str>`: baseline method for paired tests (default: `role_agent_summary_semantic`)
+- `--save-generated-role-summaries`: persist generated summaries by fold/window
+- `--save-retrieval-traces`, `--retrieval-trace-top-k`: save top retrieved chunks per query
 
 ### Metrics and evaluation
-- Reports the same core retrieval metrics:
+- Reports retrieval metrics:
   - `Hit@k`
   - `Precision@k`
   - `NDCG@k`
-- Computes fold-level paired significance tests between methods:
-  - paired t-test p-value
-  - Wilcoxon signed-rank p-value
+  - `MRR@k`
+- Method set is fixed to `role_agent_summary_chunk_semantic`.
+- Retrieval corpus is fold-filtered chunk DB (`fold == current_fold`).
+- Query/target rows come from fold/window `test.json` only.
+- Agent table split uses fold-specific test schema only (`scaled_test_time_series.csv`).
 
 ### Environment
 Create `.env` with:
@@ -556,19 +610,20 @@ OPENAI_API_KEY=
 
 ### Dependencies
 ```bash
-pip install sentence-transformers rank-bm25 openai python-dotenv
+pip install langchain-openai langchain-chroma openai python-dotenv
 ```
 
 ## File: scripts/4_seekpolicy.py
 
 ### Purpose
 Runs SEEK-Policy RAG summary retrieval experiments with the same evaluation concept as other retrieval scripts:
-- optional generation of `RAG_v1_summary` via persisted Chroma + OpenAI
+- automatic generation of missing `RAG_v1_summary` via persisted Chroma + OpenAI
 - fold-aware retrieval evaluation
-- paired significance testing across folds
+- optional retrieval trace export per fold/window query
 
 ### Inputs
 - `data/csv/group_kfold_assignments.csv` (or equivalent CSV)
+- `data/model_input/kfold/fold_<i>/window_<w>/test.json` (query-level fold/window test protocol)
 - Required columns (defaults):
   - fold: `fold`
   - document id: `Document ID`
@@ -578,51 +633,66 @@ Runs SEEK-Policy RAG summary retrieval experiments with the same evaluation conc
 ### Outputs
 - `results/seekpolicy_experiments/all_fold_results.csv`
 - `results/seekpolicy_experiments/summary_mean_metrics.csv`
-- `results/seekpolicy_experiments/paired_significance_tests.csv`
 - `results/seekpolicy_experiments/run_metadata.json`
-- optional generated summary CSV when `--generate-rag-summary` is used
+- generated summary CSV:
+  - single window run: `results/seekpolicy_experiments/generated_rag_summaries.csv`
+  - multi-window run: `results/seekpolicy_experiments/generated_rag_summaries_by_window/window_<w>.csv`
+- optional trace CSV per fold/window/method when `--save-retrieval-traces` is used:
+  - `results/seekpolicy_experiments/fold_<i>/window_<w>/rag_summary_semantic/retrieval_traces.csv`
 
 ### How to run
 ```bash
-python scripts/4_seekpolicy.py --query-column RAG_v1_summary
+python scripts/4_seekpolicy.py --windows 1,2,5,10
 ```
 
-Example (single fold):
-```bash
-python scripts/4_seekpolicy.py --fold 0 --query-column RAG_v1_summary
-```
-
-Example (generate RAG summaries + evaluate):
+Example (all folds/windows, eval filter OFF by default, save traces):
 ```bash
 python scripts/4_seekpolicy.py \
-  --generate-rag-summary \
-  --source-column "Family Summary" \
-  --query-column RAG_v1_summary
+  --windows 1,2,5,10 \
+  --save-retrieval-traces \
+  --retrieval-trace-top-k 10
+```
+
+Example (single fold/window):
+```bash
+python scripts/4_seekpolicy.py \
+  --fold 0 \
+  --window 1
 ```
 
 ### Important options
 - `--policy-input <path>`: input CSV (default: `data/csv/group_kfold_assignments.csv`)
+- `--model-input-dir <path>`: fold/window model input root (default: `data/model_input/kfold`)
 - `--output-dir <path>`: output folder (default: `results/seekpolicy_experiments`)
-- `--encoder <model_name>`: SentenceTransformer model (default: `sentence-transformers/all-distilroberta-v1`)
+- `--windows <csv>`: windows to evaluate (default: `1,2,5,10`)
+- `--window <int>`: evaluate one window only (overrides `--windows`)
+- `--fold <int>`: run only one fold (default: all folds)
 - `--k-values <csv>`: ranking cutoffs (default: `1,5,10`)
+- `--encoder <str>`: embedding model for evaluation retrieval (default: `text-embedding-3-small`)
+- `--fold-column <str>`: fold column name (default: `fold`)
+- `--doc-id-column <str>`: document ID column name (default: `Document ID`)
 - `--query-column <str>`: RAG summary query column (default: `RAG_v1_summary`)
-- `--generate-rag-summary`: generate missing query summaries with persisted Chroma + OpenAI
 - `--source-column <str>`: source text column for RAG generation (default: `Family Summary`)
 - `--openai-model <str>`: OpenAI model for generation (default: `gpt-4o-mini`)
 - `--rag-k <int>`: retrieved chunk count for generation (default: `5`)
-- `--text-path-column <str>`: text file path column used to build/load Chroma chunks (default: `text_file_path`)
-- `--chroma-dir <path>`: persisted Chroma directory (default: `data/vectorstore/seekpolicy_chroma`)
-- `--rebuild-chroma`: rebuild Chroma index from policy text files before generation
-- `--significance-baseline <str>`: baseline method for paired tests (default: `rag_summary_semantic`)
+- `--chroma-dir <path>`: persisted Chroma directory (default: `data/vectorstore/policy_chunks_chroma`)
+- `--chroma-collection <str>`: Chroma collection name (default: `policy_chunks_openai`)
+- `--generated-output <path>`: optional output path for generated summaries
+- `--eval-use-metadata-filter`: enable metadata filter for evaluation retrieval (default: OFF)
+- `--save-retrieval-traces`: save per-query ranked retrieval rows
+- `--retrieval-trace-top-k <int>`: top retrieved chunks to store per query (`0` => use max k)
+
+### Progress logs
+- After each fold/window completes (or is skipped), the script prints:
+  - `fold, window, left/total`
+  - example: `0, 1, 19/20`
 
 ### Metrics and evaluation
 - Reports:
   - `Hit@k`
   - `Precision@k`
   - `NDCG@k`
-- Computes fold-level paired significance tests:
-  - paired t-test p-value
-  - Wilcoxon signed-rank p-value
+  - `MRR@k`
 
 ### Environment
 Create `.env` with:
@@ -632,7 +702,7 @@ OPENAI_API_KEY=
 
 ### Dependencies
 ```bash
-pip install sentence-transformers rank-bm25 openai python-dotenv langchain-openai langchain-community langchain-chroma chromadb
+pip install openai python-dotenv langchain-openai langchain-chroma chromadb
 ```
 
 ---
