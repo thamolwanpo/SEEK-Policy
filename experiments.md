@@ -162,59 +162,56 @@ This section describes the protocol for `scripts/4_generate_role_agents_summary.
 
 ## Goal
 
-Evaluate retrieval quality when the query text is a role-agent generated summary (for example `summarizer_v1`) instead of time-series features.
+Evaluate chunk-level retrieval quality when the query text is a role-agent summary (for example `role_agent_summary`) and run the experiment by fold and history window.
 
 ## Evaluation setup
 
 - Fold split source: `data/csv/group_kfold_assignments.csv`
-- Retrieval corpus for each fold: rows where `fold != current_fold` (human summaries)
-- Query set for each fold: rows where `fold == current_fold`
+- Windowed test source: `data/model_input/kfold/fold_<i>/window_<w>/test.json`
+- Retrieval corpus for each fold: chunk corpus from persisted Chroma vector DB filtered by the same fold id (`fold == current_fold`)
+- Query set for each fold/window: records from `test.json` mapped to policy document ids via `anchor_summary`
+- Agent table schema source: `data/model_input/kfold/fold_<i>/scaled_test_time_series.csv` (test-only; can differ by fold)
+- Time-series prompt inputs are split into separate `climate_data`, `socio_economics_data`, and `other_data` tables per fold
 
 Compared methods:
-- `role_agent_summary_semantic` (SentenceTransformer, query from role-agent summary column)
-- `human_summary_semantic` (SentenceTransformer, query from human summary column)
-- `climate_policy_radar_bm25` (BM25 keyword baseline)
+- `role_agent_summary_chunk_semantic` (OpenAI embeddings, query from role-agent summary column)
 
 ## Metrics
 
 - `Hit@k`
 - `Precision@k`
 - `NDCG@k`
-
-## Statistical significance across folds
-
-The script runs paired fold-level tests against a configurable baseline method:
-- Paired t-test p-values
-- Wilcoxon signed-rank p-values
-
-Set baseline with `--significance-baseline`.
+- `MRR@k`
 
 ## Output artifacts
 
 - `results/role_agent_summary_experiments/all_fold_results.csv`
 - `results/role_agent_summary_experiments/summary_mean_metrics.csv`
-- `results/role_agent_summary_experiments/paired_significance_tests.csv`
 - `results/role_agent_summary_experiments/run_metadata.json`
 
 ## OpenAI generation mode (optional)
 
-To generate missing role-agent summaries before evaluation:
+To generate role-agent summaries from fold/window time-series records before evaluation:
 - add `OPENAI_API_KEY` in `.env`
-- run with `--generate-role-summary`
+- run with `--generate-role-summary-from-time-series`
 
 ## Example commands
 
-Evaluate existing role-agent summaries:
-```bash
-python scripts/4_generate_role_agents_summary.py --query-column summarizer_v1
-```
-
-Generate then evaluate:
+Evaluate one fold and one window:
 ```bash
 python scripts/4_generate_role_agents_summary.py \
-  --generate-role-summary \
-  --source-column "Family Summary" \
-  --query-column summarizer_v1
+  --fold 0 \
+  --window 1 \
+  --chunk-vectordb-collection auto
+```
+
+Generate role-agent summaries from time-series chain, then evaluate:
+```bash
+python scripts/4_generate_role_agents_summary.py \
+  --generate-role-summary-from-time-series \
+  --save-generated-role-summaries \
+  --windows 1,2,5,10 \
+  --chunk-vectordb-collection auto
 ```
 
 ---

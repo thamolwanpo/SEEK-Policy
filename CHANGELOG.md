@@ -2,7 +2,157 @@
 
 This file tracks notable changes across files in this repository.
 
+## 2026-02-24
+
+### File: scripts/4_summary_only_baselines.py
+
+- Updated query source behavior for summary-only baselines:
+	- `human_summary_chunk_semantic` uses `Family Summary`
+	- `chunk_bm25` uses `Keyword`
+- Updated BM25 keyword preprocessing:
+	- `Keyword` values are normalized by splitting on `;` and joining with spaces before tokenization.
+
+### File: README.md
+
+- Updated `scripts/4_summary_only_baselines.py` documentation to match current behavior:
+	- documented method-specific query sources (`Family Summary` vs `Keyword`)
+	- documented required `Keyword` column in policy input
+	- documented BM25 semicolon keyword normalization.
+
+### File: instructions.md
+
+- Updated operational instructions for `scripts/4_summary_only_baselines.py`:
+	- input requirements now include `Keyword`
+	- evaluation behavior now documents method-specific query columns
+	- added BM25 semicolon keyword normalization note.
+
+## 2026-02-18
+
+### File: scripts/4_seekpolicy.py
+
+- Updated SEEK-Policy generation/evaluation flow to current always-generate behavior:
+	- removed optional `--generate-rag-summary` gating; generation now runs before evaluation
+	- enabled per-window generation for multi-window runs (`--windows 1,2,5,10`)
+	- evaluation now uses the generated summaries associated with each specific window
+- Added explicit fold-window completion progress line in this format:
+	- `fold, window, left/total`
+	- printed after each fold/window completes (including skipped windows)
+- Updated generated summary output behavior:
+	- single-window run writes `generated_rag_summaries.csv`
+	- multi-window run writes `generated_rag_summaries_by_window/window_<w>.csv`
+
+### File: scripts/4_seekpolicy.py
+
+- Refined SEEK-Policy retrieval workflow to the current fold/window protocol and method naming:
+	- evaluation method recorded as `rag_summary_chunk_semantic`
+	- queries sourced from `data/model_input/kfold/fold_<i>/window_<w>/test.json`
+- Added eval metadata filter toggle with safe default OFF:
+	- new `--eval-use-metadata-filter` flag enables eval-time metadata filtering only when explicitly requested
+	- generation-time progressive metadata fallback remains enabled for RAG summary generation
+- Added per-query retrieval trace export:
+	- new `--save-retrieval-traces` and `--retrieval-trace-top-k` options
+	- trace output under `results/seekpolicy_experiments/fold_<i>/window_<w>/rag_summary_chunk_semantic/retrieval_traces.csv`
+- Added fold-level parallel execution and explicit progress logging:
+	- new `--fold-parallelism` option
+	- query progress logs include `fold/window` and `left/total`
+- Added generation table-stage parallelism:
+	- new `--table-parallelism` option for parallel table analysis and blending steps
+
+### File: scripts/3_build_chunk_vectordb.py
+
+- Added metadata-only backfill mode for existing persisted Chroma records:
+	- new `--update-metadata-only` flow updates `geography` and `sector` by `document_id` without re-embedding
+	- new `--metadata-update-batch-size` option for batched metadata updates
+- Updated standard chunk metadata payload to include `geography` and `sector` during normal index build.
+
+### File: README.md
+
+- Updated `scripts/4_seekpolicy.py` documentation to match current behavior:
+	- removed stale BM25/human-baseline and paired-significance references
+	- documented default eval filter OFF behavior
+	- added all-fold/all-window run example with trace saving
+	- documented trace output paths and current dependency list.
+	- updated method name to `rag_summary_semantic`
+	- documented always-generate behavior and `fold, window, left/total` progress logs.
+
+### File: instructions.md
+
+- Rewrote operational instructions for `scripts/4_seekpolicy.py`:
+	- aligned purpose/inputs/outputs/options with current CLI and protocol
+	- added run commands for all folds/windows with trace export (without eval filter)
+	- removed stale options no longer present in CLI
+	- documented current progress line format: `fold, window, left/total`.
+
+## 2026-02-17
+
+### File: scripts/4_generate_role_agents_summary.py
+
+- Simplified role-agent retrieval to one method only:
+	- `role_agent_summary_chunk_semantic`
+- Removed non-requested comparison/significance paths from this script:
+	- removed human-summary semantic baseline and BM25 baseline
+	- removed paired significance test generation/output
+- Aligned role-summary generation input formatting with notebook-style table blocks:
+	- `[START_OF_TABLE] ... [END_OF_TABLE]`
+- Updated generation chain so advisors consume separate domain tables instead of one shared table:
+	- `climate_data`
+	- `socio_economics_data`
+	- `other_data`
+- Added fold-specific, test-only table schema behavior for advisor table splitting:
+	- domain feature indices are derived from `data/model_input/kfold/fold_<i>/scaled_test_time_series.csv`
+	- no train-set schema fallback in role-agent generation
+- Renamed ambiguous summary stage variables for clarity:
+	- `summary_v0` → `retrieval_summary_draft`
+	- `summary_v1` → `retrieval_summary_final`
+- Updated default query column name:
+	- `summarizer_v1` → `role_agent_summary`
+
+### File: README.md
+
+- Updated `scripts/4_generate_role_agents_summary.py` documentation to match current behavior:
+	- single retrieval method only
+	- no paired significance output
+	- metrics include `MRR@k`
+	- generation examples updated to `--generate-role-summary-from-time-series`
+	- default query column updated to `role_agent_summary`
+	- documented fold-specific, test-only schema source for advisor table splits
+
+### File: experiments.md
+
+- Updated role-agent experiment protocol text:
+	- replaced example query name `summarizer_v1` with `role_agent_summary`
+	- documented test-only fold schema source (`scaled_test_time_series.csv`)
+	- documented per-domain advisor table splitting (climate/socio/other)
+
+### File: instructions.md
+
+- Rewrote operational section for `scripts/4_generate_role_agents_summary.py` to match current script:
+	- updated defaults/options/commands/output artifacts
+	- removed stale significance and BM25/human-baseline references
+	- added fold/window test-only + domain-split behavior notes
+
 ## 2026-02-16
+
+### File: README.md
+
+- Added a new top-level `Quick run (end-to-end)` section with:
+	- environment setup (`pip install -r requirements.txt`)
+	- `.env` note for `OPENAI_API_KEY`
+	- ordered pipeline commands from split/preprocess through retrieval experiments.
+- Updated `scripts/4_summary_only_baselines.py` documentation to match current script behavior:
+	- corrected baseline method names to `human_summary_chunk_semantic` and `chunk_bm25`
+	- documented chunk vector DB input requirements
+	- added retrieval trace output/options
+	- corrected dependencies to OpenAI/LangChain + BM25 stack.
+
+### File: instructions.md
+
+- Added a new `Project quick run (from scratch)` section with a minimal, ordered command sequence for setup and execution.
+- Updated `scripts/4_summary_only_baselines.py` operational instructions to reflect current CLI/options and evaluation behavior:
+	- OpenAI embedding model option and chunk DB options
+	- trace export options
+	- corrected default significance baseline name
+	- updated dependencies and `OPENAI_API_KEY` requirement.
 
 ### File: scripts/4_train_siamese.py
 

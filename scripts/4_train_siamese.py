@@ -744,7 +744,7 @@ def resolve_chunk_collection_name(
 def load_chunk_corpus_from_vectordb(
     vectordb_dir: Path,
     collection_name: str,
-    train_fold_ids: list[int],
+    chunk_fold_ids: list[int],
 ) -> pd.DataFrame:
     try:
         from langchain_chroma import Chroma
@@ -796,7 +796,7 @@ def load_chunk_corpus_from_vectordb(
             f"No chunk entries found in vector DB collection `{resolved_collection}` at {vectordb_dir}."
         )
 
-    fold_set = set(int(fold_id) for fold_id in train_fold_ids)
+    fold_set = set(int(fold_id) for fold_id in chunk_fold_ids)
     rows: list[dict[str, str]] = []
     for chunk_text, metadata in zip(documents, metadatas):
         metadata = metadata or {}
@@ -901,7 +901,9 @@ def ranked_doc_ids_for_query(
     return [agg_doc_ids[i] for i in order]
 
 
-def ranked_doc_ids_from_scores(scores: np.ndarray, corpus_doc_ids: list[str]) -> list[str]:
+def ranked_doc_ids_from_scores(
+    scores: np.ndarray, corpus_doc_ids: list[str]
+) -> list[str]:
     if len(corpus_doc_ids) == 0:
         return []
 
@@ -940,7 +942,7 @@ def evaluate_retrieval(
     window: int,
     backbone: str,
     loss_name: str,
-    train_fold_ids: list[int],
+    chunk_fold_ids: list[int],
     test_json: Path,
     k_values: list[int],
     device: str,
@@ -1043,12 +1045,15 @@ def evaluate_retrieval(
 
     metrics["queries_evaluated"] = float(max(len(test_rows) - skipped, 0))
     metrics["queries_total"] = float(len(test_rows))
-    metrics["train_folds"] = ";".join(str(fold) for fold in sorted(train_fold_ids))
+    metrics["train_folds"] = ";".join(str(fold) for fold in sorted(chunk_fold_ids))
+    metrics["chunk_folds"] = ";".join(str(fold) for fold in sorted(chunk_fold_ids))
     metrics["test_fold"] = str(fold_id)
     return metrics
 
 
-def build_hparam_trials(args: argparse.Namespace, loss_name: str) -> list[ModelHyperParams]:
+def build_hparam_trials(
+    args: argparse.Namespace, loss_name: str
+) -> list[ModelHyperParams]:
     if not args.tune_hyperparams:
         return [
             ModelHyperParams(
@@ -1357,7 +1362,7 @@ def save_shared_tuned_hparams(
 
 def train_and_eval_one(
     fold_id: int,
-    train_fold_ids: list[int],
+    chunk_fold_ids: list[int],
     window: int,
     backbone: str,
     loss_name: str,
@@ -1560,7 +1565,8 @@ def train_and_eval_one(
     if args.train_only:
         result = {
             "fold": fold_id,
-            "train_folds": ";".join(str(fold) for fold in sorted(train_fold_ids)),
+            "train_folds": ";".join(str(fold) for fold in sorted(chunk_fold_ids)),
+            "chunk_folds": ";".join(str(fold) for fold in sorted(chunk_fold_ids)),
             "window": window,
             "backbone": backbone,
             "loss": loss_name,
@@ -1595,7 +1601,7 @@ def train_and_eval_one(
     chunk_corpus_df = load_chunk_corpus_from_vectordb(
         vectordb_dir=args.chunk_vectordb_dir,
         collection_name=args.chunk_vectordb_collection,
-        train_fold_ids=train_fold_ids,
+        chunk_fold_ids=chunk_fold_ids,
     )
 
     k_values = parse_csv_ints(args.k_values)
@@ -1607,7 +1613,7 @@ def train_and_eval_one(
         window=window,
         backbone=backbone,
         loss_name=loss_name,
-        train_fold_ids=train_fold_ids,
+        chunk_fold_ids=chunk_fold_ids,
         test_json=test_json,
         k_values=k_values,
         device=device,
@@ -1619,7 +1625,8 @@ def train_and_eval_one(
 
     result = {
         "fold": fold_id,
-        "train_folds": ";".join(str(fold) for fold in sorted(train_fold_ids)),
+        "train_folds": ";".join(str(fold) for fold in sorted(chunk_fold_ids)),
+        "chunk_folds": ";".join(str(fold) for fold in sorted(chunk_fold_ids)),
         "window": window,
         "backbone": backbone,
         "loss": loss_name,
@@ -1775,7 +1782,9 @@ def main() -> None:
     if args.tune_only and args.train_only:
         raise ValueError("--tune-only cannot be combined with --train-only")
     if args.use_tuned_hparams and args.tune_hyperparams:
-        raise ValueError("--use-tuned-hparams cannot be combined with --tune-hyperparams")
+        raise ValueError(
+            "--use-tuned-hparams cannot be combined with --tune-hyperparams"
+        )
     if args.train_only and args.eval_only:
         raise ValueError("--train-only cannot be combined with --eval-only")
     if args.shared_tuned_hparams_dir is not None and not args.shared_tuned_hparams:
@@ -1830,14 +1839,14 @@ def main() -> None:
     all_results: list[dict] = []
 
     for fold_id in eval_fold_ids:
-        train_fold_ids = [fold_id]
+        chunk_fold_ids = [fold_id]
 
         for window in windows:
             for backbone in backbones:
                 for loss_name in losses:
                     result = train_and_eval_one(
                         fold_id=fold_id,
-                        train_fold_ids=train_fold_ids,
+                        chunk_fold_ids=chunk_fold_ids,
                         window=window,
                         backbone=backbone,
                         loss_name=loss_name,
@@ -1862,7 +1871,9 @@ def main() -> None:
         training_results_path = args.output_dir / "all_fold_training_results.csv"
         pd.DataFrame(all_results).to_csv(training_results_path, index=False)
         print(f"Saved training-only results: {training_results_path}")
-        print("Train-only run completed. Skipping retrieval evaluation aggregate reports.")
+        print(
+            "Train-only run completed. Skipping retrieval evaluation aggregate reports."
+        )
         return
 
     results_df = pd.DataFrame(all_results)
@@ -1914,7 +1925,9 @@ def main() -> None:
         },
         "eval_only": {
             "enabled": bool(args.eval_only),
-            "eval_checkpoint": str(args.eval_checkpoint) if args.eval_checkpoint else "auto",
+            "eval_checkpoint": (
+                str(args.eval_checkpoint) if args.eval_checkpoint else "auto"
+            ),
         },
         "policy_retrieval_note": (
             "Hit@k is complemented with Precision@k, NDCG@k, and MRR@k. "
