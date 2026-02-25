@@ -334,7 +334,9 @@ Optional arguments:
 ## 6) `scripts/4_summary_only_baselines.py`
 **Purpose**
 - Runs retrieval baselines without time-series features.
-- Uses policy summaries as queries and evaluates against a chunk corpus loaded from persisted vector DB.
+- Evaluates against a chunk corpus loaded from persisted vector DB with method-specific query sources:
+  - `human_summary_chunk_semantic` uses `Family Summary`
+  - `chunk_bm25` uses `Keyword`
 
 **Baselines**
 - `human_summary_chunk_semantic`: OpenAI embedding semantic retrieval over chunks
@@ -343,6 +345,12 @@ Optional arguments:
 **Main inputs (default)**
 - `data/csv/group_kfold_assignments.csv`
 - `data/vectorstore/policy_chunks_chroma/`
+
+Required query/target columns in policy CSV:
+- `fold`
+- `Document ID`
+- `Family Summary` (semantic baseline)
+- `Keyword` (BM25 baseline)
 
 **Main outputs**
 - `results/summary_only_baselines/all_fold_results.csv`
@@ -394,6 +402,7 @@ pip install langchain-openai langchain-chroma rank-bm25
 **Notes**
 - Requires `OPENAI_API_KEY` for `human_summary_chunk_semantic`.
 - Build the chunk DB first with `python scripts/3_build_chunk_vectordb.py`.
+- BM25 keyword queries normalize semicolon-separated terms by splitting on `;` and joining with spaces before tokenization.
 
 ---
 

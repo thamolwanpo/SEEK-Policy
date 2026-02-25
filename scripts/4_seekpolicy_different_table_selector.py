@@ -20,9 +20,20 @@ except Exception as exc:  # pragma: no cover - import guard
         "Missing dependency `langchain-openai`. Install with `pip install langchain-openai`."
     ) from exc
 
+# --- Table selection: embedding-based from table_selector ---
+from table_selector import (
+    discover_owid_titles,
+    OpenAIEmbeddings,
+    embed_texts,
+    normalize_rows,
+    select_titles_for_policies,
+    configure_openai_concurrency,
+    ensure_openai_api_key_loaded,
+)
+
 DEFAULT_POLICY_INPUT = Path("data/csv/group_kfold_assignments.csv")
 DEFAULT_MODEL_INPUT_DIR = Path("data/model_input/kfold")
-DEFAULT_OUTPUT_DIR = Path("results/seekpolicy_experiments")
+DEFAULT_OUTPUT_DIR = Path("results/seekpolicy_baselinetable_experiments")
 DEFAULT_K_VALUES = "1,5,10"
 DEFAULT_WINDOWS = "1,2,5,10"
 DEFAULT_ENCODER = "text-embedding-3-small"
@@ -1645,6 +1656,28 @@ def main() -> None:
         doc_id_col=args.doc_id_column,
         query_col=args.query_column,
     )
+
+    ensure_openai_api_key_loaded()
+    configure_openai_concurrency(args.openai_concurrency)
+    titles = discover_owid_titles(DEFAULT_OWID_DIR)
+    embeddings = OpenAIEmbeddings(model=DEFAULT_ENCODER)
+    title_vectors = embed_texts(embeddings, titles, batch_size=128)
+    title_vectors = normalize_rows(title_vectors)
+    # Example: select top-N tables for each policy
+    selected_tables_df = select_titles_for_policies(
+        policy_df=policy_df,
+        titles=titles,
+        title_vectors=title_vectors,
+        embeddings=embeddings,
+        top_n=5,
+        batch_size=128,
+        fold_col=args.fold_column,
+        doc_id_col=args.doc_id_column,
+    )
+    # Save selected tables
+    selected_tables_path = args.output_dir / "selected_tables_embedding.csv"
+    selected_tables_df.to_csv(selected_tables_path, index=False)
+    print(f"Saved embedding-based selected tables: {selected_tables_path}")
 
     fold_ids = sorted(policy_df[args.fold_column].unique().tolist())
     if args.fold is not None:

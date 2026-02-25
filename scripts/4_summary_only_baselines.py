@@ -107,22 +107,30 @@ def clean_text(value: object) -> str:
     return " ".join(value.split())
 
 
+def clean_keyword_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    parts = [clean_text(part) for part in value.split(";")]
+    return " ".join(part for part in parts if part)
+
+
 def simple_tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
 
 def load_policy_df(path: Path) -> pd.DataFrame:
     df = pd.read_csv(path)
-    required = {"fold", "Family Summary", "Document ID"}
+    required = {"fold", "Family Summary", "Keyword", "Document ID"}
     missing = [col for col in required if col not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in {path}: {missing}")
 
     out = df.copy()
     out["Family Summary"] = out["Family Summary"].apply(clean_text)
+    out["Keyword"] = out["Keyword"].apply(clean_keyword_text)
     out["Document ID"] = out["Document ID"].astype(str)
     out["fold"] = out["fold"].astype(int)
-    out = out[(out["Family Summary"] != "") & (out["Document ID"] != "")]
+    out = out[out["Document ID"] != ""]
     return out.reset_index(drop=True)
 
 
@@ -436,6 +444,7 @@ def evaluate_fold(
     method_name: str,
     retriever: object,
     test_df: pd.DataFrame,
+    query_column: str,
     chunk_corpus_df: pd.DataFrame,
     k_values: list[int],
     save_retrieval_traces: bool,
@@ -466,7 +475,7 @@ def evaluate_fold(
         )
 
     for query_index, row in query_iter:
-        query = str(row["Family Summary"])
+        query = str(row[query_column])
         target = str(row["Document ID"])
         if not query or not target:
             skipped += 1
@@ -740,10 +749,19 @@ def main() -> None:
     for fold_id in fold_ids:
         chunk_fold_ids = [fold_id]
 
-        test_df = policy_df[policy_df["fold"] == fold_id][
-            ["Family Summary", "Document ID"]
-        ].copy()
-        test_df = test_df.drop_duplicates().reset_index(drop=True)
+        fold_df = policy_df[policy_df["fold"] == fold_id].copy()
+        semantic_test_df = fold_df[["Family Summary", "Document ID"]].copy()
+        semantic_test_df = (
+            semantic_test_df[semantic_test_df["Family Summary"] != ""]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        bm25_test_df = fold_df[["Keyword", "Document ID"]].copy()
+        bm25_test_df = (
+            bm25_test_df[bm25_test_df["Keyword"] != ""]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
 
         chunk_corpus_df, chunk_embeddings = load_chunk_corpus_from_vectordb(
             vectordb_dir=args.chunk_vectordb_dir,
@@ -753,7 +771,8 @@ def main() -> None:
 
         print(
             "[INFO] Fold setup: "
-            f"fold={fold_id}, queries={len(test_df)}, "
+            f"fold={fold_id}, semantic_queries={len(semantic_test_df)}, "
+            f"bm25_queries={len(bm25_test_df)}, "
             f"chunks={len(chunk_corpus_df)}, "
             f"unique_docs={chunk_corpus_df['Document ID'].nunique()}"
         )
@@ -768,9 +787,14 @@ def main() -> None:
         )
         bm25 = ChunkBM25Retriever(chunk_texts=chunk_texts)
 
-        for method_name, retriever in [
-            ("human_summary_chunk_semantic", semantic),
-            ("chunk_bm25", bm25),
+        for method_name, retriever, method_test_df, query_column in [
+            (
+                "human_summary_chunk_semantic",
+                semantic,
+                semantic_test_df,
+                "Family Summary",
+            ),
+            ("chunk_bm25", bm25, bm25_test_df, "Keyword"),
         ]:
             print(f"[INFO] Running method={method_name} on fold={fold_id}")
             run_dir = args.output_dir / f"fold_{fold_id}" / method_name
@@ -778,7 +802,8 @@ def main() -> None:
                 fold_id=fold_id,
                 method_name=method_name,
                 retriever=retriever,
-                test_df=test_df,
+                test_df=method_test_df,
+                query_column=query_column,
                 chunk_corpus_df=chunk_corpus_df,
                 k_values=k_values,
                 save_retrieval_traces=args.save_retrieval_traces,

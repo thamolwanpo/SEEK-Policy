@@ -2,6 +2,30 @@
 
 This file tracks notable changes across files in this repository.
 
+## 2026-02-24
+
+### File: scripts/4_summary_only_baselines.py
+
+- Updated query source behavior for summary-only baselines:
+	- `human_summary_chunk_semantic` uses `Family Summary`
+	- `chunk_bm25` uses `Keyword`
+- Updated BM25 keyword preprocessing:
+	- `Keyword` values are normalized by splitting on `;` and joining with spaces before tokenization.
+
+### File: README.md
+
+- Updated `scripts/4_summary_only_baselines.py` documentation to match current behavior:
+	- documented method-specific query sources (`Family Summary` vs `Keyword`)
+	- documented required `Keyword` column in policy input
+	- documented BM25 semicolon keyword normalization.
+
+### File: instructions.md
+
+- Updated operational instructions for `scripts/4_summary_only_baselines.py`:
+	- input requirements now include `Keyword`
+	- evaluation behavior now documents method-specific query columns
+	- added BM25 semicolon keyword normalization note.
+
 ## 2026-02-18
 
 ### File: scripts/4_seekpolicy.py

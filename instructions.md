@@ -1,3 +1,54 @@
+# File: scripts/calc_rouge_retrieval_traces.py
+
+### Purpose
+Calculates ROUGE scores between generated queries in retrieval trace files (from role agent or seek policy experiments) and human summary text from the policy input CSV.
+
+### Inputs
+- Retrieval trace files (CSV or JSON) per fold/window, containing generated queries and document IDs (e.g., results/role_agent_summary_experiments/fold_0/window_1/retrieval_traces.csv)
+- Policy input CSV with human summaries (e.g., data/csv/group_kfold_assignments.csv)
+
+### Outputs
+- CSV file with ROUGE-1, ROUGE-2, and ROUGE-L F1 scores for each document/query (default: results/rouge_scores.csv)
+
+### How to run
+```bash
+python scripts/calc_rouge_retrieval_traces.py \
+  --retrieval-traces-dir <path_to_traces_dir> \
+  --policy-input <path_to_policy_csv>
+```
+
+Example:
+```bash
+python scripts/calc_rouge_retrieval_traces.py \
+  --retrieval-traces-dir results/role_agent_summary_experiments/ \
+  --policy-input data/csv/group_kfold_assignments.csv
+```
+
+### Important options
+- `--retrieval-traces-dir <path>`: Directory containing retrieval trace files (required)
+- `--policy-input <path>`: CSV file with human summaries (required)
+- `--query-column <str>`: Column name for generated query in traces (default: RAG_v1_summary)
+- `--human-summary-column <str>`: Column name for human summary in policy input (default: Family Summary)
+- `--doc-id-column <str>`: Document ID column (default: Document ID)
+- `--output <path>`: Output CSV file for ROUGE scores (default: results/rouge_scores.csv)
+
+### Validation
+- Prints warning if any trace file cannot be loaded.
+- Skips rows where no human summary is found for a document ID.
+- Output CSV contains: doc_id, trace_file, rouge1, rouge2, rougeL, generated_query, human_summary
+
+### Dependencies
+```bash
+pip install rouge-score tqdm
+```
+
+### Notes
+- Supports both CSV and JSON retrieval trace files.
+- For all options, run:
+  ```bash
+  python scripts/calc_rouge_retrieval_traces.py --help
+  ```
+
 # File Instructions Log
 
 This document tracks usage instructions and operational notes for each script/file.
@@ -470,7 +521,7 @@ Runs summary-query retrieval baselines without time-series features:
 - Keyword retrieval over chunk corpus with BM25 (`chunk_bm25`)
 
 ### Inputs
-- `data/csv/group_kfold_assignments.csv` (must include `fold`, `Family Summary`, `Document ID`)
+- `data/csv/group_kfold_assignments.csv` (must include `fold`, `Family Summary`, `Keyword`, `Document ID`)
 - `data/vectorstore/policy_chunks_chroma/` (persisted chunk DB from `scripts/3_build_chunk_vectordb.py`)
 
 ### Outputs
@@ -521,7 +572,9 @@ python scripts/4_summary_only_baselines.py \
 - For each fold:
   - Retrieval corpus = chunk rows where chunk `fold == current_fold`
   - Queries/targets = policy rows where `fold == current_fold`
-  - Query text is `Family Summary`
+  - Query text by method:
+    - `human_summary_chunk_semantic`: `Family Summary`
+    - `chunk_bm25`: `Keyword` (semicolon-separated values are normalized by `split(';')` and joined with spaces)
   - Target identifier is `Document ID`
 
 ### Dependencies
