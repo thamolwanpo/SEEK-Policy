@@ -3,8 +3,7 @@
 Selects samples from retrieval traces using stratified sampling by hit@1
 (success / failure) with best-effort geographic diversity, then evaluates
 both the SEEK-Policy generated query *and* the human Family Summary for the
-same document using deepeval GEval (Temporal-Semantic Alignment) and
-HallucinationMetric side-by-side.
+same document using three deepeval metrics side-by-side.
 
 Why stratified sampling?
   Simple random sampling risks "cherry-picking" easy cases.  Stratifying by
@@ -21,11 +20,19 @@ Judge rubric (per deepeval metric):
   1. Temporal-Semantic Alignment (GEval 1-5):
        Does the summary accurately reflect the quantitative trends
        (upward / downward / stable) of the raw time-series data?
+       Addresses: Reviewer 2, Point 14 (semantic alignment).
   2. Hallucination (HallucinationMetric 0-1):
-       Does the summary claim a policy trend that is not supported by the
-       provided source context?
+       Does the summary invent facts (e.g. a specific carbon-tax percentage
+       or a policy year) that are absent from the input document metadata?
+       Context is the structured document metadata (title, geography, sector,
+       etc.) — identical for both human and AI summaries.
+       Addresses: Reviewer 2, Point 15 (hallucinations / omissions).
+  3. Summarization (SummarizationMetric 0-1):
+       Does the summary cover the important parts of the time-series context
+       without being too vague or distorting coverage?
+       Addresses: Reviewer 1, Point 7 (summary quality / coverage).
 
-Both metrics are applied to:
+All three metrics are applied to:
   - SEEK-Policy generated query  (summary_type = "seek_policy")
   - Human Family Summary         (summary_type = "human")
 for the *same* document, enabling a direct comparison.
@@ -65,7 +72,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 try:
-    from deepeval.metrics import GEval, HallucinationMetric
+    from deepeval.metrics import GEval, HallucinationMetric, SummarizationMetric
     from deepeval.test_case import LLMTestCase, LLMTestCaseParams
 
     DEEPEVAL_AVAILABLE = True
@@ -367,6 +374,26 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--metadata-context-columns",
+        nargs="+",
+        default=[
+            "Title",
+            "Document Title",
+            "Family Name",
+            "Document Type",
+            "Geography",
+            "Sector",
+            "Category",
+            "Framework",
+        ],
+        help=(
+            "Columns from --policy-input used as factual context for the "
+            "Hallucination metric.  The summary is checked for claims not "
+            "supported by this metadata.  Only columns that actually exist "
+            "in the CSV are used."
+        ),
+    )
+    parser.add_argument(
         "--run-evaluation",
         action="store_true",
         help=(
@@ -628,6 +655,30 @@ def build_judge_input(row: dict, model_input_map: dict[str, dict]) -> str:
     return f"Policy document for {geography} in the {sector} sector."
 
 
+def build_metadata_context(row: dict, metadata_columns: list[str]) -> list[str]:
+    """Build a list of fact strings from document metadata for hallucination checking.
+
+    The Hallucination metric checks whether the summary invents facts absent
+    from this context.  We use structured document metadata (title, geography,
+    sector …) rather than the human summary, so both summary types are judged
+    against the same factual ground truth.
+
+    Returns a list of non-empty 'Column: value' strings.
+    """
+    lines: list[str] = []
+    for col in metadata_columns:
+        val = row.get(col, "")
+        if val and str(val).strip() not in ("", "nan", "None"):
+            lines.append(f"{col}: {str(val).strip()}")
+    if not lines:
+        # Minimal fallback: at least geography + sector
+        lines = [
+            f"Geography: {str(row.get('Geography', 'Unknown'))}",
+            f"Sector: {str(row.get('Sector', 'Unknown'))}",
+        ]
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # deepeval evaluation
 # ---------------------------------------------------------------------------
@@ -638,9 +689,25 @@ def run_deepeval(
     judge_model: str,
     model_input_dir: Path | None,
     output_dir: Path,
+    metadata_columns: list[str],
 ) -> None:
-    """Run GEval + HallucinationMetric for every sample, comparing
-    SEEK-Policy generated query vs. human summary for the same document.
+    """Run GEval + HallucinationMetric + SummarizationMetric for every sample,
+    comparing SEEK-Policy generated query vs. human summary for the same document.
+
+    Metric details
+    --------------
+    1. Temporal-Semantic Alignment (GEval 1-5):
+       Input context = time-series statistics.
+       Checks directional accuracy against the raw data.
+
+    2. Hallucination (HallucinationMetric 0-1):
+       Context = structured document metadata (title, geography, sector …).
+       Identical context for both summary types — checks whether either
+       summary invents facts absent from the input metadata.
+
+    3. Summarization (SummarizationMetric 0-1):
+       Input = time-series context.
+       Checks coverage (important points captured) and accuracy (no distortion).
 
     Outputs:
         results/llm_judge/llm_judge_results.csv   – per-sample scores
@@ -667,6 +734,7 @@ def run_deepeval(
         model=judge_model,
     )
     hallucination_metric = HallucinationMetric(threshold=0.5, model=judge_model)
+    summarization_metric = SummarizationMetric(threshold=0.5, model=judge_model)
 
     # Cache model-input maps: (fold, window) → {doc_id: record}
     mi_cache: dict[tuple, dict[str, dict]] = {}
@@ -692,10 +760,11 @@ def run_deepeval(
             mi_map = mi_cache[cache_key]
 
         judge_input = build_judge_input(row_dict, mi_map)
-        chunk_text = str(row_dict.get("top_chunk_text", "")).strip()
-        # Use ground truth policy document (human_summary) as context for HallucinationMetric
-        human_summary = str(row_dict.get("human_summary", "")).strip()
-        context_list = [human_summary] if human_summary else [judge_input]
+
+        # Metadata context for hallucination — same for both summary types.
+        # Checks whether either the AI or human summary invents facts not
+        # present in the structured document metadata.
+        metadata_context = build_metadata_context(row_dict, metadata_columns)
 
         base: dict = {
             "doc_id": doc_id,
@@ -723,7 +792,7 @@ def run_deepeval(
                 "judge_input": judge_input,
             }
 
-            # Temporal-Semantic Alignment
+            # 1. Temporal-Semantic Alignment (GEval vs. time-series data)
             try:
                 tc_align = LLMTestCase(input=judge_input, actual_output=summary_text)
                 alignment_metric.measure(tc_align)
@@ -733,12 +802,12 @@ def run_deepeval(
                 row_result["alignment_score"] = None
                 row_result["alignment_reason"] = f"ERROR: {exc}"
 
-            # Hallucination
+            # 2. Hallucination (vs. input document metadata)
             try:
                 tc_halluc = LLMTestCase(
                     input=judge_input,
                     actual_output=summary_text,
-                    context=context_list,
+                    context=metadata_context,
                 )
                 hallucination_metric.measure(tc_halluc)
                 row_result["hallucination_score"] = hallucination_metric.score
@@ -748,6 +817,18 @@ def run_deepeval(
             except Exception as exc:
                 row_result["hallucination_score"] = None
                 row_result["hallucination_reason"] = f"ERROR: {exc}"
+
+            # 3. Summarization — coverage + accuracy vs. time-series context
+            try:
+                tc_summ = LLMTestCase(input=judge_input, actual_output=summary_text)
+                summarization_metric.measure(tc_summ)
+                row_result["summarization_score"] = summarization_metric.score
+                row_result["summarization_reason"] = getattr(
+                    summarization_metric, "reason", ""
+                )
+            except Exception as exc:
+                row_result["summarization_score"] = None
+                row_result["summarization_reason"] = f"ERROR: {exc}"
 
             results.append(row_result)
 
@@ -762,7 +843,9 @@ def run_deepeval(
 
     # Print mean-score summary comparing seek_policy vs. human
     score_cols = [
-        c for c in ["alignment_score", "hallucination_score"] if c in results_df.columns
+        c
+        for c in ["alignment_score", "hallucination_score", "summarization_score"]
+        if c in results_df.columns
     ]
     if score_cols:
         summary = (
@@ -830,9 +913,19 @@ def main() -> None:
         )
     policy_df[args.doc_id_column] = policy_df[args.doc_id_column].astype(str)
 
-    keep_cols = [args.doc_id_column, args.human_summary_column] + [
-        c for c in ["Geography", "Sector"] if c in policy_df.columns
+    # Include extra metadata columns for the Hallucination metric context.
+    # Deduplicate while preserving order; doc_id and human_summary come first.
+    _base_cols = {args.doc_id_column, args.human_summary_column, "Geography", "Sector"}
+    extra_meta_cols = [
+        c
+        for c in args.metadata_context_columns
+        if c in policy_df.columns and c not in _base_cols
     ]
+    keep_cols = (
+        [args.doc_id_column, args.human_summary_column]
+        + [c for c in ["Geography", "Sector"] if c in policy_df.columns]
+        + extra_meta_cols
+    )
     policy_map = (
         policy_df[keep_cols]
         .drop_duplicates(subset=[args.doc_id_column])
@@ -914,6 +1007,9 @@ def main() -> None:
             judge_model=args.judge_model,
             model_input_dir=args.model_input_dir,
             output_dir=args.output_dir,
+            metadata_columns=[
+                c for c in args.metadata_context_columns if c in eval_df.columns
+            ],
         )
     else:
         print(
