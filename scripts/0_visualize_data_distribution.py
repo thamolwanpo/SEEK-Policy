@@ -115,7 +115,7 @@ def plot_multi_fold_bar(
         axes_list = [axes]
 
     plot_axis_indices = list(range(len(axes_list)))
-    if mapping_axis_index >= 0:
+    if mapping_box_text and mapping_axis_index >= 0:
         plot_axis_indices.remove(mapping_axis_index)
 
     for idx, (fold, (train_series, test_series)) in enumerate(
@@ -134,10 +134,11 @@ def plot_multi_fold_bar(
             color=["#1f77b4", "#ff7f0e"],
             legend=(idx == 0),
         )
-        ax.set_title(f"Fold {fold}")
-        ax.set_xlabel(xlabel)
-        ax.set_ylabel(ylabel)
-        ax.tick_params(axis="x", rotation=45)
+        ax.set_title(f"Fold {fold}", fontsize=20)
+        ax.set_xlabel(xlabel, fontsize=16)
+        ax.set_ylabel(ylabel, fontsize=16)
+        ax.tick_params(axis="x", rotation=45, labelsize=14)
+        ax.tick_params(axis="y", labelsize=14)
         ax.grid(axis="y", linestyle="--", alpha=0.6)
 
         for patch in ax.patches:
@@ -146,9 +147,9 @@ def plot_multi_fold_bar(
     for axis_idx in plot_axis_indices[n_folds:]:
         axes_list[axis_idx].axis("off")
 
-    fig.suptitle(title_prefix, fontsize=16, fontweight="bold")
+    fig.suptitle(title_prefix, fontsize=24, fontweight="bold")
 
-    if mapping_box_text:
+    if mapping_box_text and mapping_axis_index >= 0:
         mapping_ax = axes_list[mapping_axis_index]
         mapping_ax.axis("off")
         mapping_ax.text(
@@ -157,7 +158,7 @@ def plot_multi_fold_bar(
             mapping_box_text,
             ha="left",
             va="top",
-            fontsize=8,
+            fontsize=16,
             family="monospace",
             transform=mapping_ax.transAxes,
             bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.9},
@@ -312,9 +313,6 @@ def main() -> None:
         )
 
     summary_dir = FIGURE_DIR / "kfold_summary"
-    fold_hatch_box = format_fold_hatch_box(
-        folds=sorted(region_series.keys()), title="Fold hatch mapping"
-    )
 
     plot_multi_fold_bar(
         fold_series=region_series,
@@ -322,7 +320,7 @@ def main() -> None:
         output_path=summary_dir / "region_distribution_all_folds.svg",
         xlabel="Region",
         ylabel="Percentage of Documents (%)",
-        mapping_box_text=fold_hatch_box,
+        mapping_box_text=None,
     )
 
     sector_label_map = build_short_label_map(sector_series, prefix="S")
@@ -330,7 +328,6 @@ def main() -> None:
     sector_mapping_box = format_mapping_box(
         sector_label_map, title="Sector code mapping (short = full)"
     )
-    sector_mapping_box = f"{sector_mapping_box}\n\n{fold_hatch_box}"
 
     plot_multi_fold_bar(
         fold_series=sector_series_short,

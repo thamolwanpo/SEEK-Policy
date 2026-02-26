@@ -11,9 +11,9 @@ Why stratified sampling?
   retrieval success / failure and geography proves to reviewers that the
   evaluation covers the full diversity of the POLiMATCH dataset.
 
-Sampling protocol (default: 50 samples total):
-  * 25 samples where SEEK-Policy achieved hit@1 = 1  (success)
-  * 25 samples where SEEK-Policy achieved hit@1 = 0  (failure)
+Sampling protocol (default: 100 samples total):
+  * 50 samples where SEEK-Policy achieved hit@1 = 1  (success)
+  * 50 samples where SEEK-Policy achieved hit@1 = 0  (failure)
   Within each stratum, samples are drawn using round-robin across continents
   (Europe, Asia, Americas, Africa, Oceania) for geographic diversity.
 
@@ -53,6 +53,11 @@ import argparse
 import json
 import os
 import re
+
+# load dotenv from project root to get OPENAI_API_KEY if set in .env
+from dotenv import load_dotenv
+
+load_dotenv()
 
 import numpy as np
 import pandas as pd
@@ -323,13 +328,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--n-success",
         type=int,
-        default=25,
+        default=50,
         help="Number of hit@1 = 1 (success) samples to include.",
     )
     parser.add_argument(
         "--n-failure",
         type=int,
-        default=25,
+        default=50,
         help="Number of hit@1 = 0 (failure) samples to include.",
     )
     parser.add_argument(
@@ -467,9 +472,7 @@ def compute_per_query_hits(traces: pd.DataFrame) -> pd.DataFrame:
         top_chunk_text, top_chunk_source
     """
     traces = traces.copy()
-    traces["retrieved_rank"] = pd.to_numeric(
-        traces["retrieved_rank"], errors="coerce"
-    )
+    traces["retrieved_rank"] = pd.to_numeric(traces["retrieved_rank"], errors="coerce")
 
     group_keys = [
         c for c in ["fold", "window", "method", "target_doc_id"] if c in traces.columns
@@ -477,9 +480,7 @@ def compute_per_query_hits(traces: pd.DataFrame) -> pd.DataFrame:
 
     rows: list[dict] = []
     for keys, grp in traces.groupby(group_keys, dropna=False):
-        key_dict = dict(
-            zip(group_keys, keys if isinstance(keys, tuple) else (keys,))
-        )
+        key_dict = dict(zip(group_keys, keys if isinstance(keys, tuple) else (keys,)))
 
         rank1 = grp[grp["retrieved_rank"] == 1]
         if rank1.empty:
@@ -692,11 +693,9 @@ def run_deepeval(
 
         judge_input = build_judge_input(row_dict, mi_map)
         chunk_text = str(row_dict.get("top_chunk_text", "")).strip()
-        # Context for HallucinationMetric: the source material the summary
-        # should be grounded in
-        context_list = (
-            [chunk_text] if chunk_text and chunk_text != "nan" else [judge_input]
-        )
+        # Use ground truth policy document (human_summary) as context for HallucinationMetric
+        human_summary = str(row_dict.get("human_summary", "")).strip()
+        context_list = [human_summary] if human_summary else [judge_input]
 
         base: dict = {
             "doc_id": doc_id,
@@ -726,9 +725,7 @@ def run_deepeval(
 
             # Temporal-Semantic Alignment
             try:
-                tc_align = LLMTestCase(
-                    input=judge_input, actual_output=summary_text
-                )
+                tc_align = LLMTestCase(input=judge_input, actual_output=summary_text)
                 alignment_metric.measure(tc_align)
                 row_result["alignment_score"] = alignment_metric.score
                 row_result["alignment_reason"] = alignment_metric.reason
@@ -764,7 +761,9 @@ def run_deepeval(
     print(f"Saved LLM-as-a-Judge results to {out_path}")
 
     # Print mean-score summary comparing seek_policy vs. human
-    score_cols = [c for c in ["alignment_score", "hallucination_score"] if c in results_df.columns]
+    score_cols = [
+        c for c in ["alignment_score", "hallucination_score"] if c in results_df.columns
+    ]
     if score_cols:
         summary = (
             results_df.groupby("summary_type")[score_cols]
@@ -892,9 +891,7 @@ def main() -> None:
 
     if "continent" in eval_df.columns:
         continent_dist = (
-            eval_df.groupby(["stratum", "continent"])
-            .size()
-            .unstack(fill_value=0)
+            eval_df.groupby(["stratum", "continent"]).size().unstack(fill_value=0)
         )
         print("\n  Geographic distribution across strata:")
         print(continent_dist.to_string())
@@ -903,7 +900,7 @@ def main() -> None:
     # 5. Save validation set
     # -------------------------------------------------------------------
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    val_path = args.output_dir / "validation_50_samples.csv"
+    val_path = args.output_dir / "validation_100_samples.csv"
     eval_df.to_csv(val_path, index=False)
     print(f"\nSaved validation set → {val_path}")
 

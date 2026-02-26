@@ -151,7 +151,12 @@ def parse_args() -> argparse.Namespace:
             "and report p-values (paired t-test + Wilcoxon signed-rank)."
         )
     )
-    parser.add_argument("--results-csv", type=Path, required=True)
+    parser.add_argument(
+        "--results-csv",
+        type=Path,
+        required=False,
+        help="Path to a single results CSV. If omitted, all results/*/summary_mean_metrics.csv will be used.",
+    )
     parser.add_argument(
         "--output-csv",
         type=Path,
@@ -186,14 +191,51 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+
     args = parse_args()
 
-    results_df = pd.read_csv(args.results_csv)
+    # Auto-discover all summary_mean_metrics.csv if --results-csv is not provided
+    if args.results_csv is None:
+        import glob
+
+        csv_paths = glob.glob("results/*/summary_mean_metrics.csv")
+        if not csv_paths:
+            raise FileNotFoundError(
+                "No summary_mean_metrics.csv files found in results/*/"
+            )
+        dfs = []
+        for path in csv_paths:
+            df = pd.read_csv(path)
+            df["experiment"] = Path(path).parent.name
+            df = df.rename(columns={"window": "fold"})
+            dfs.append(df)
+        results_df = pd.concat(dfs, ignore_index=True)
+        output_csv = Path("results/paired_significance_tests.csv")
+    else:
+        results_df = pd.read_csv(args.results_csv)
+        if "window" in results_df.columns and "fold" not in results_df.columns:
+            results_df = results_df.rename(columns={"window": "fold"})
+        output_csv = args.output_csv
+        if output_csv is None:
+            output_csv = args.results_csv.parent / "paired_significance_tests.csv"
+
+    # If 'method' column is missing, create it from 'backbone' and 'loss'
+    if "method" not in results_df.columns:
+        if "backbone" in results_df.columns and "loss" in results_df.columns:
+            results_df["method"] = (
+                results_df["backbone"].astype(str)
+                + "|"
+                + results_df["loss"].astype(str)
+            )
+        else:
+            raise ValueError(
+                "Cannot create 'method' column: missing 'backbone' or 'loss' columns."
+            )
+
     validate_results_df(results_df)
 
     all_methods = sorted(results_df["method"].astype(str).unique().tolist())
     baselines = parse_csv_list(args.baselines)
-
     metric_cols = infer_metric_columns(results_df)
     requested_metrics = parse_csv_list(args.metrics)
     if requested_metrics:
@@ -215,9 +257,6 @@ def main() -> None:
         method_pairs=method_pairs,
     )
 
-    output_csv = args.output_csv
-    if output_csv is None:
-        output_csv = args.results_csv.parent / "paired_significance_tests.csv"
     output_csv.parent.mkdir(parents=True, exist_ok=True)
     significance_df.to_csv(output_csv, index=False)
 
